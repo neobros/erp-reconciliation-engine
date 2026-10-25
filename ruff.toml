@@ -1,0 +1,6 @@
+line-length = 100
+target-version = "py312"
+extend-exclude = ["harness", "src/invoices/migrations"]
+
+[lint]
+select = ["E", "F", "I", "B", "UP"]
