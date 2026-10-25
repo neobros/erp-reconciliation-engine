@@ -1,0 +1,16 @@
+# Scrapes the API (ingest counters + backlog/lag gauges) and every worker replica.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: api
+    static_configs:
+      - targets: ["api:8000"]
+
+  - job_name: worker
+    # Docker DNS returns one A record per replica, so `--scale worker=N` is picked up.
+    dns_sd_configs:
+      - names: ["worker"]
+        type: A
+        port: 9101
+        refresh_interval: 15s

@@ -1,0 +1,102 @@
+x-app: &app
+  build: .
+  environment: &app-env
+    DATABASE_URL: postgres://app:app@postgres:5432/app
+    REDIS_URL: redis://redis:6379/0
+    ERP_BASE_URL: http://mock-erp:9100
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mock-erp:
+    build:
+      context: .
+      dockerfile: docker/mock-erp.Dockerfile
+    environment:
+      ERP_SEED: "42"
+      ERP_RATE_LIMIT: "10"
+      ERP_PO_COUNT: "${ERP_PO_COUNT:-1000}"   # must equal max(100, count // 3)
+      ERP_CHAOS: "1"
+    ports: ["9100:9100"]
+
+  api:
+    <<: *app
+    # 4 gunicorn processes share metrics through PROMETHEUS_MULTIPROC_DIR (wiped on start).
+    # Set for gunicorn only, so `docker compose exec api pytest` does not write into it.
+    command: >
+      sh -c "rm -rf /tmp/prom && mkdir -p /tmp/prom &&
+             python src/manage.py migrate --noinput &&
+             PROMETHEUS_MULTIPROC_DIR=/tmp/prom exec gunicorn config.wsgi -b 0.0.0.0:8000 -w 4"
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      # Healthy only after migrations ran and gunicorn is serving.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  worker:
+    <<: *app
+    command: celery -A config worker -Q reconcile,dispatch --pool=threads --concurrency=10 --loglevel=INFO
+    # Prometheus metrics. A port range so `docker compose up --scale worker=2` works:
+    # replicas get 9101, 9102, ...
+    ports: ["9101-9104:9101"]
+    # Graceful drain: on `docker compose stop` Celery gets SIGTERM, stops taking messages and
+    # finishes the tasks it is running (warm shutdown). Unstarted prefetched messages go back
+    # to Redis. 30 s > the longest task (20 s limiter wait + 2.5 s ERP timeout + DB writes);
+    # anything still running after that is recovered by its 60 s lease.
+    stop_grace_period: 30s
+    depends_on:
+      api: { condition: service_healthy }   # wait for migrations
+      mock-erp: { condition: service_started }
+
+  beat:
+    <<: *app
+    command: celery -A config beat --schedule /tmp/celerybeat-schedule --loglevel=INFO
+    depends_on:
+      api: { condition: service_healthy }
+
+  # --- Optional monitoring (bonus): docker compose --profile monitoring up -d ---
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    profiles: ["monitoring"]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    profiles: ["monitoring"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"      # local demo only: no login
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/pipeline.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus]

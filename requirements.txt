@@ -1,0 +1,16 @@
+Django>=5.2,<5.3
+djangorestframework>=3.15,<4
+dj-database-url>=2.1,<3
+psycopg[binary]>=3.2,<4
+celery[redis]>=5.4,<6
+redis>=5.0,<7
+httpx>=0.27,<1
+structlog>=24.1
+prometheus-client>=0.20
+gunicorn>=22
+
+# tests / lint
+pytest>=8
+pytest-django>=4.8
+respx>=0.21
+ruff>=0.5
